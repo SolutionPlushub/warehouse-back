@@ -1,0 +1,44 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# YWMS API — Docker Compose Dev (branche develop)
+#
+# Même structure que prod mais :
+#   - IMAGE_TAG pointe sur l'image :develop
+#   - API_DOMAIN pointe sur le sous-domaine dev
+#   - Variables d'env dev (Neon branch dev, JWT secrets dev, etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  api:
+    image: ghcr.io/${GITHUB_REPOSITORY}/api:${IMAGE_TAG:-develop}
+    container_name: ywms_api_dev
+    restart: unless-stopped
+    # Logs Docker plafonnés (3 × 10 Mo) — sans limite, ils grossissent
+    # jusqu'à remplir le disque du serveur.
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    environment:
+      DATABASE_URL: ${DATABASE_URL}         # Neon branch "develop"
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      RESEND_FROM: ${RESEND_FROM}
+      FRONTEND_URL: ${FRONTEND_URL}         # ex: https://warehouse-dev.solution-plus.es,http://localhost:3000
+      COOKIE_SECRET: ${COOKIE_SECRET}
+      AZURE_STORAGE_CONNECTION_STRING: ${AZURE_STORAGE_CONNECTION_STRING}
+      AZURE_STORAGE_DOCUMENTS_CONTAINER: ${AZURE_STORAGE_DOCUMENTS_CONTAINER:-dossier-documents}
+      NODE_ENV: development
+      PORT: 3001
+    ports:
+      - '3010:3001'
+    # NOTE : Traefik n'est pas encore configuré sur le serveur DEV — le port
+    # hôte 3001 est déjà pris par un autre service (istamco-auth), donc
+    # publié sur 3010 en attendant (même fix que docker-compose.dev.yml du
+    # frontend, qui reste lui sur 3000/routé). Une fois Traefik en place,
+    # remettre `expose: ['3001']`, rattacher au réseau externe traefik_public
+    # et restaurer les labels de routage (voir historique git de ce fichier).

@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# YWMS API — Docker Compose Production
+#
+# Ce fichier est dédié au repo backend uniquement.
+# - Base de données : Neon (PostgreSQL serverless, externe — pas de container DB)
+# - Le frontend est déployé dans un repo et serveur séparés
+# - Traefik est supposé déjà en cours d'exécution sur le serveur (réseau externe)
+# - Redis (queues Bull) : instance partagée déployée séparément, voir
+#   D:\ISTAMCO\infra\redis — doit tourner sur le même réseau traefik-public
+#   pour être résolvable via REDIS_HOST=shared_redis (voir .env)
+#
+# Usage : docker compose up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  api:
+    image: ghcr.io/${GITHUB_REPOSITORY}/api:${IMAGE_TAG:-latest}
+    container_name: ywms_api
+    restart: unless-stopped
+    # Logs Docker plafonnés (3 × 10 Mo) — sans limite, ils grossissent
+    # jusqu'à remplir le disque du serveur.
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      REDIS_HOST: ${REDIS_HOST:-shared_redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: ${REDIS_DB:-0}
+    expose:
+      - '3001'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3001/api/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - traefik-public   # réseau surveillé par Traefik (provider.docker.network)
+    labels:
+      - traefik.enable=true
+
+      # ── Route principale /api ───────────────────────────────────────────────
+      - traefik.http.routers.ywms-api.rule=Host(`${API_DOMAIN}`) && PathPrefix(`/api`)
+      - traefik.http.routers.ywms-api.entrypoints=websecure
+      - traefik.http.routers.ywms-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.ywms-api.service=ywms-api-svc
+      - traefik.http.services.ywms-api-svc.loadbalancer.server.port=3001
+
+networks:
+  traefik-public:
+    external: true   # réseau surveillé par Traefik (provider.docker.network: traefik-public)
