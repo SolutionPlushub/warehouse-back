@@ -1,0 +1,7 @@
+-- AlterEnum
+ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'STAY_FRANCHISE';
+
+-- AlterTable
+ALTER TABLE "tenants" ADD COLUMN "stayMonthlyThresholdDays" INTEGER NOT NULL DEFAULT 31;
+ALTER TABLE "tenants" ADD COLUMN "stayAlertLeadDays" INTEGER NOT NULL DEFAULT 2;
+ALTER TABLE "tenants" ADD COLUMN "stayWeekendsIncluded" BOOLEAN NOT NULL DEFAULT true;

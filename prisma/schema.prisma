@@ -1,0 +1,2483 @@
+// YWMS — Prisma Schema (Prisma 7)
+// La datasource est dans prisma.config.ts (plus dans ce fichier)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum TenantType {
+  OPERATOR
+  CLIENT
+}
+
+enum YardType {
+  YARD
+  WAREHOUSE
+  BONDED_WAREHOUSE
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+  CLIENT
+  CUSTOMS
+  // Direction Exploitation — décisions hiérarchiques (validation N+1,
+  // validation DEX avant sortie §15) et signature/cachet apposés sur les
+  // bons de sortie. Miroir de DEX_ROLES côté frontend (dos-config-store.js).
+  DEX
+}
+
+// Exception individuelle sur une permission, par-dessus les profils.
+// DENY l'emporte toujours sur un GRANT de profil ou un GRANT direct.
+enum PermissionEffect {
+  GRANT
+  DENY
+}
+
+enum TokenType {
+  REFRESH
+  PASSWORD_RESET
+  ACCOUNT_CONFIRMATION
+}
+
+enum AlertType {
+  SOMMIER_EXPIRY // dossier WMS proche/dépassé de l'expiration douanière (J-30/J-7/J-0)
+  POSITIONING_DELAY // conteneur en attente de confirmation de position > seuil
+  STAY_FRANCHISE // J-N avant fin de franchise séjour (magasinage)
+}
+
+enum AlertLevel {
+  INFO
+  WARNING
+  DANGER
+}
+
+// ─────────────────────────────────────────────
+// FACTURATION SAAS (abonnement plateforme — DISTINCT du modèle Payment
+// métier ci-dessous, qui facture les clients-cargo du yard, pas la
+// plateforme elle-même. Ne jamais réutiliser Payment/PaymentStatus pour
+// la facturation SaaS.)
+// ─────────────────────────────────────────────
+
+enum PlanCode {
+  STARTER
+  BUSINESS
+  ENTERPRISE
+}
+
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE // échec de paiement récurrent, en relance (dunning)
+  SUSPENDED // dunning épuisé — accès en lecture seule ou bloqué
+  CANCELED
+  EXPIRED // essai gratuit terminé sans conversion
+}
+
+enum SubscriptionInvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  FAILED
+  VOID
+}
+
+enum PaymentProvider {
+  STRIPE
+  CINETPAY
+}
+
+enum SaasPaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+// ─────────────────────────────────────────────
+// MULTI-TENANT
+// ─────────────────────────────────────────────
+
+model Tenant {
+  id        String     @id @default(cuid())
+  name      String
+  type      TenantType @default(CLIENT)
+  slug      String     @unique
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  // Branding
+  brandColor    String @default("#0050A0")
+  brandInitials String @default("ORG")
+  brandTagline  String @default("")
+  brandLogoText String @default("")
+  site          String @default("")
+  plan          String @default("Business")
+
+  // Fiche client (pertinent seulement pour type=CLIENT — préremplit le
+  // formulaire de création de dossier : conditions de paiement par défaut,
+  // franchise contractuelle, identité légale). Miroir de DOS_CLIENTS côté
+  // frontend (lib/data/data-dos.js), qui n'avait pas d'équivalent backend.
+  address                  String          @default("")
+  contact                  String          @default("")
+  ninea                    String          @default("")
+  rccm                     String          @default("")
+  contractRef              String          @default("")
+  contractOk               Boolean         @default(true)
+  // Solde comptable (FCFA) — négatif = encours dû par le client. Distinct
+  // du blocage comptable (ClientAccountingBlock), qui est une décision DEX
+  // explicite plutôt qu'un simple solde.
+  balance                  Int             @default(0)
+  defaultPaymentTerms      PaymentTermType @default(ON_CREDIT)
+  defaultPaymentMode       String          @default("virement") // especes | virement | cheque
+  defaultFreetimeDays      Int             @default(3)
+  // Contrat client (fiche Clients › <client>) : franchise des conteneurs
+  // VIDES (null = même franchise que les pleins), préfixes propriétaire des
+  // conteneurs (HMMU, KOCU…), devise de facturation, délai de paiement,
+  // échéance, agent local, grille appliquée (libellé) et contacts.
+  emptyFreetimeDays        Int?
+  // Franchise du camion chargé (transbordement) avant surestarie, en
+  // heures (null = 24 h par défaut).
+  truckFreetimeHours       Int?
+  containerPrefixes        String[]        @default([])
+  currency                 String          @default("XOF")
+  paymentDelayDays         Int?
+  contractEndsAt           DateTime?
+  localAgent               String          @default("")
+  tariffGridLabel          String          @default("")
+  // [{ name, role, email, phone }]
+  contacts                 Json?
+  // Moteur de séjour (tenant opérateur) — distinct de la franchise client
+  // (defaultFreetimeDays). Palier journalier→mensuel, alerte J-N, week-ends.
+  stayMonthlyThresholdDays Int             @default(31)
+  stayAlertLeadDays        Int             @default(2)
+  stayWeekendsIncluded     Boolean         @default(true)
+
+  users                    User[]
+  accessRoles              AccessRole[]
+  yards                    Yard[]
+  shipmentFiles            ShipmentFile[]
+  clientDossiers           ShipmentFile[]            @relation("ShipmentFileClient")
+  yardContainers           YardContainer[]
+  storageRegimeRefs        StorageRegimeRef[]
+  shipmentTypeRefs         ShipmentTypeRef[]
+  packageTypeRefs          PackageTypeRef[]
+  tariffRefs               TariffRef[]
+  inducedServiceRefs       InducedServiceRef[]
+  operationInducedRules    OperationInducedRule[]
+  shipmentFileServiceLines ShipmentFileServiceLine[]
+  shipmentFileDocuments    ShipmentFileDocument[]
+  invoices                 Invoice[]
+  carrierRefs              CarrierRef[]
+  handlingEquipmentRefs    HandlingEquipmentRef[]
+  dexProfile               DexProfile?
+  accountingBlocksPosed    ClientAccountingBlock[]   @relation("ClientAccountingBlockOperator")
+  accountingBlocksAsClient ClientAccountingBlock[]   @relation("ClientAccountingBlockClient")
+  notificationTemplates    NotificationTemplate[]
+  notificationLogs         NotificationLog[]
+  storageZones             StorageZone[]
+  modules                  TenantModule[]
+  preGates                 PreGate[]
+  shippingLineRefs         ShippingLineRef[]
+  containerTypeRefs        ContainerTypeRef[]
+  yardBlockDefs            YardBlockDef[]
+  zoneAllocations          ClientZoneAllocation[]    @relation("ClientZoneAllocationClient")
+  yardContainerClients     YardContainer[]           @relation("YardContainerClient")
+  preGateClients           PreGate[]                 @relation("PreGateClient")
+  payments                 Payment[]
+  alerts                   Alert[]
+  shipmentFileAuditLogs    ShipmentFileAuditLog[]
+  subscription             Subscription?
+  subscriptionInvoices     SubscriptionInvoice[]
+  eirs                     EIR[]
+  tmsVehicles              TmsVehicle[]
+  gateTruckVisits          GateTruckVisit[]
+  truckLoads               TruckLoad[]
+  tmsDrivers               TmsDriver[]
+  tmsTrips                 TmsTrip[]
+  portWindows              TmsPortWindow[]
+  reportSchedules          ReportSchedule[]
+  reportConversations      ReportConversation[]
+
+  @@map("tenants")
+}
+
+model ReportSchedule {
+  id          String    @id @default(cuid())
+  tenantId    String
+  createdById String
+  name        String
+  reportKind  String
+  frequency   String
+  weekday     Int?
+  sendTime    String
+  timezone    String    @default("Africa/Dakar")
+  recipients  String[]
+  clientIds   String[]
+  isActive    Boolean   @default(true)
+  nextRunAt   DateTime
+  lastRunAt   DateTime?
+  lastStatus  String?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([isActive, nextRunAt])
+  @@index([tenantId])
+  @@map("report_schedules")
+}
+
+model ReportConversation {
+  id        String   @id @default(cuid())
+  tenantId  String
+  userId    String
+  title     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ReportMessage[]
+
+  @@index([tenantId, userId, updatedAt])
+  @@map("report_conversations")
+}
+
+model ReportMessage {
+  id             String   @id @default(cuid())
+  conversationId String
+  role           String
+  content        String
+  createdAt      DateTime @default(now())
+
+  conversation ReportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("report_messages")
+}
+
+model TenantModule {
+  id          String   @id @default(cuid())
+  tenantId    String
+  moduleCode  String // WMS | YMS | TMS | Admin
+  isActive    Boolean  @default(true)
+  activatedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, moduleCode])
+  @@map("tenant_modules")
+}
+
+// ─────────────────────────────────────────────
+// YARDS / ENTREPÔTS (multi-sites par tenant)
+// ─────────────────────────────────────────────
+
+model Yard {
+  id            String   @id @default(cuid())
+  tenantId      String
+  code          String // ex: ICD-DAKAR
+  name          String // ex: ICD Dakar — Zone Portuaire
+  type          YardType @default(YARD)
+  surfaceM2     Float? // superficie totale du site
+  // Capacité nominale en EVP (taux d'occupation du Parc conteneurs) — null =
+  // capacité déduite du nombre de positions.
+  capacityEvp   Int?
+  address       String?
+  city          String?
+  country       String   @default("SN")
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  stackingRules Json?
+  // Tracé du périmètre extérieur du yard, dessiné à main levée par
+  // l'utilisateur (plus d'image de référence externe — ce tracé EST le plan
+  // de référence du dépôt) — tableau de points {x,y} en % (0-100), relatif
+  // au canvas de tracé. Optionnel — null = pas de périmètre tracé, affichage
+  // schématique en grille par défaut. Sert de zone de travail pour tracer
+  // les blocs à l'intérieur (YardBlockDef.polygon, même format/référentiel).
+  perimeter     Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant               Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  storageZones         StorageZone[]
+  yardPositions        YardPosition[]
+  defaultShipmentFiles ShipmentFile[] // dossiers ayant ce yard comme yard par défaut
+  yardContainers       YardContainer[]
+  shipmentLines        ShipmentLine[] // lignes physiquement stockées dans ce yard
+  preGates             PreGate[]
+  yardBlockDefs        YardBlockDef[]
+  usersWithDefault     User[]          @relation
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("yards")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  tenantId      String? // null = SUPER_ADMIN plateforme
+  email         String    @unique
+  passwordHash  String
+  firstName     String
+  lastName      String
+  role          UserRole  @default(AGENT)
+  isActive      Boolean   @default(true)
+  lastLoginAt   DateTime?
+  // Yard pré-sélectionné par défaut dans les écrans avec filtre par yard
+  defaultYardId String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  tenant              Tenant?                @relation(fields: [tenantId], references: [id])
+  defaultYard         Yard?                  @relation(fields: [defaultYardId], references: [id], onDelete: SetNull)
+  tokens              Token[]
+  yardMovements       YardMovement[]
+  modules             UserModule[]
+  accessRoles         UserAccessRole[]
+  permissionOverrides UserPermission[]
+  attachedDocs        ShipmentFileDocument[]
+  auditLogs           ShipmentFileAuditLog[]
+  reportConversations ReportConversation[]
+
+  @@map("users")
+}
+
+model UserModule {
+  id         String   @id @default(cuid())
+  userId     String
+  moduleCode String // WMS | YMS | TMS | Admin
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, moduleCode])
+  @@map("user_modules")
+}
+
+// ─────────────────────────────────────────────
+// CONTRÔLE D'ACCÈS DYNAMIQUE
+// Catalogue de permissions en base, profils (rôles) affectables,
+// et exceptions par utilisateur (GRANT / DENY).
+// Le rôle enum User.role reste le filet de compatibilité tant qu'aucun
+// profil n'est explicitement affecté à l'utilisateur.
+// ─────────────────────────────────────────────
+
+model Permission {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  module       String
+  action       String
+  label        String
+  description  String   @default("")
+  /// Réservé à la plateforme (SUPER_ADMIN). Un admin de tenant ne peut pas l'octroyer.
+  platformOnly Boolean  @default(false)
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  roleLinks RolePermission[]
+  userLinks UserPermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model AccessRole {
+  id              String   @id @default(cuid())
+  code            String
+  name            String
+  description     String   @default("")
+  /// "SYSTEM" pour un profil partagé, sinon l'id du tenant.
+  scopeKey        String
+  tenantId        String?
+  isSystem        Boolean  @default(false)
+  /// true une fois les permissions du modèle appliquées — les éditions admin ne sont pas écrasées au redémarrage.
+  defaultsApplied Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant      Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions RolePermission[]
+  users       UserAccessRole[]
+
+  @@unique([scopeKey, code])
+  @@index([tenantId])
+  @@map("access_roles")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       AccessRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserAccessRole {
+  userId    String
+  roleId    String
+  createdAt DateTime @default(now())
+
+  user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role AccessRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_access_roles")
+}
+
+model UserPermission {
+  userId       String
+  permissionId String
+  effect       PermissionEffect
+  createdAt    DateTime         @default(now())
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+  @@map("user_permissions")
+}
+
+// ─────────────────────────────────────────────
+// TOKENS (refresh + reset password + confirmation)
+// ─────────────────────────────────────────────
+
+model Token {
+  id        String    @id @default(cuid())
+  userId    String
+  type      TokenType
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId, type])
+  @@map("tokens")
+}
+
+// ─────────────────────────────────────────────
+// ALERTES (centre de notifications — alimenté par les jobs Bull)
+// ─────────────────────────────────────────────
+
+model Alert {
+  id         String     @id @default(cuid())
+  tenantId   String
+  type       AlertType
+  level      AlertLevel @default(WARNING)
+  message    String
+  // Référence informelle à l'entité concernée (ShipmentFile, YardContainer…) —
+  // pas de relation Prisma pour rester générique entre plusieurs types d'alerte.
+  entityType String?
+  entityId   String?
+  // Empêche les doublons entre deux exécutions du scan périodique pour la
+  // même entité/seuil (ex: "sommier-{shipmentFileId}-j7", "positioning-{id}-2026-07-18")
+  dedupeKey  String     @unique
+  readAt     DateTime?
+  createdAt  DateTime   @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, readAt])
+  @@index([entityType, entityId])
+  @@map("alerts")
+}
+
+// ─────────────────────────────────────────────
+// FACTURATION SAAS (abonnement plateforme)
+// ─────────────────────────────────────────────
+
+// Catalogue des plans commerciaux — table de référence globale (pas de
+// tenantId), gérée par le SUPER_ADMIN. Séparé de Tenant.plan (String
+// legacy, conservé comme libellé d'affichage rétrocompatible, synchronisé
+// à chaque changement de plan).
+model Plan {
+  id                 String   @id @default(cuid())
+  code               PlanCode @unique
+  name               String // "Starter" / "Business" / "Enterprise"
+  description        String?
+  maxUsers           Int? // null = illimité (Enterprise)
+  maxYards           Int? // null = illimité (Enterprise)
+  maxModules         Int? // null = illimité. Starter=1, Business=2, Enterprise=null
+  includedModules    String[] // whitelist des codes activables si maxModules borné, ex: ["WMS","YMS"]
+  allModulesIncluded Boolean  @default(false) // true pour Enterprise (tous modules, y compris futurs)
+  trialDays          Int      @default(14)
+  isActive           Boolean  @default(true) // retirer de la vente sans casser les abonnés existants
+  sortOrder          Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  prices        PlanPrice[]
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+// Prix par cycle de facturation ET par devise (Stripe en EUR/USD, mobile
+// money en XOF, sans dupliquer le Plan).
+model PlanPrice {
+  id              String          @id @default(cuid())
+  planId          String
+  interval        BillingInterval
+  currency        String // ISO 4217 : "XOF", "EUR", "USD"
+  amountCents     Int // plus petite unité (XOF : montant entier, la division /100
+  // n'est appliquée que pour EUR/USD côté service)
+  discountPercent Int             @default(0) // remise vs mensuel équivalent, appliquée si interval=YEARLY
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  plan          Plan           @relation(fields: [planId], references: [id], onDelete: Cascade)
+  subscriptions Subscription[]
+
+  @@unique([planId, interval, currency])
+  @@map("plan_prices")
+}
+
+// Un seul abonnement actif par tenant à la fois (@@unique tenantId).
+// L'historique des changements se lit via SubscriptionEvent, pas via
+// plusieurs lignes Subscription.
+model Subscription {
+  id          String             @id @default(cuid())
+  tenantId    String             @unique
+  planId      String
+  planPriceId String
+  status      SubscriptionStatus @default(TRIALING)
+
+  trialEndsAt        DateTime? // null si jamais eu d'essai (ex: passage direct payant par SUPER_ADMIN)
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelAtPeriodEnd  Boolean   @default(false)
+  canceledAt         DateTime?
+
+  // Fournisseur de paiement actif pour cet abonnement (un tenant choisit un
+  // seul mode de paiement récurrent à la fois)
+  provider               PaymentProvider?
+  providerCustomerId     String? // Stripe customer id / CinetPay customer token
+  providerSubscriptionId String?          @unique // Stripe subscription id ; null pour CinetPay (géré en interne)
+
+  // Dunning
+  failedPaymentCount  Int       @default(0)
+  lastPaymentFailedAt DateTime?
+  suspendedAt         DateTime? // quand le tenant est passé en lecture seule / bloqué
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan      Plan                  @relation(fields: [planId], references: [id])
+  planPrice PlanPrice             @relation(fields: [planPriceId], references: [id])
+  invoices  SubscriptionInvoice[]
+  events    SubscriptionEvent[]
+
+  @@index([status])
+  @@index([provider, providerSubscriptionId])
+  @@map("subscriptions")
+}
+
+// Audit trail des transitions (changement de plan, échec paiement,
+// suspension...) — utile pour le support sans reconstruire l'historique
+// depuis les webhooks bruts.
+model SubscriptionEvent {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  type           String // "TRIAL_STARTED" | "PLAN_CHANGED" | "PAYMENT_FAILED" | "SUSPENDED" | "REACTIVATED" | "CANCELED"
+  payload        Json?
+  createdAt      DateTime @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([subscriptionId])
+  @@map("subscription_events")
+}
+
+// Facture SaaS (ce que le Tenant OPERATOR doit à la plateforme YWMS) — SANS
+// AUCUN RAPPORT avec le modèle Payment existant (qui reste pour la
+// facturation du yard vers ses clients-cargo).
+model SubscriptionInvoice {
+  id             String                    @id @default(cuid())
+  subscriptionId String
+  tenantId       String // dénormalisé pour requêtes/index directs sans join
+  status         SubscriptionInvoiceStatus @default(DRAFT)
+  currency       String
+  amountCents    Int
+  periodStart    DateTime
+  periodEnd      DateTime
+  dueDate        DateTime?
+  paidAt         DateTime?
+
+  // Références externes pour réconciliation webhook
+  providerInvoiceId String? // Stripe invoice id
+  providerRef       String? // CinetPay transaction_id
+
+  pdfUrl String? // lien MinIO ou URL Stripe hosted_invoice_url
+  notes  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscription Subscription  @relation(fields: [subscriptionId], references: [id])
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  payments     SaasPayment[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([providerInvoiceId])
+  @@map("subscription_invoices")
+}
+
+// Tentative de paiement (une SubscriptionInvoice peut en avoir plusieurs en
+// cas d'échec puis succès lors d'une relance dunning).
+model SaasPayment {
+  id                    String            @id @default(cuid())
+  subscriptionInvoiceId String
+  provider              PaymentProvider
+  status                SaasPaymentStatus @default(PENDING)
+  amountCents           Int
+  currency              String
+  providerPaymentId     String? // Stripe payment_intent id / CinetPay transaction_id
+  failureReason         String?
+  paidAt                DateTime?
+  rawWebhookPayload     Json? // snapshot brut de l'event webhook, pour audit/debug
+  createdAt             DateTime          @default(now())
+
+  invoice SubscriptionInvoice @relation(fields: [subscriptionInvoiceId], references: [id])
+
+  @@index([subscriptionInvoiceId])
+  @@index([provider, providerPaymentId])
+  @@map("saas_payments")
+}
+
+// ─────────────────────────────────────────────
+// WMS — ENUMS
+// ─────────────────────────────────────────────
+
+enum ShipmentFileStatus {
+  DRAFT
+  CUSTOMS_PENDING
+  PENDING_PUTAWAY
+  PARTIAL_RECEIVED // réception partielle — certains colis encore en attente
+  IN_STOCK
+  PARTIAL_OUT
+  FULLY_OUT
+  BLOCKED
+}
+
+enum ShipmentLineStatus {
+  PENDING // créé manuellement, pas encore réceptionné physiquement
+  IN_STOCK
+  RESERVED
+  PARTIAL_OUT
+  OUT
+}
+
+// Type d'opération portée par un dossier — un ShipmentFile peut porter
+// plusieurs Operation successives (ex: stockage conteneur → dépotage →
+// empotage). Aligné sur OP_TYPES (lib/data/data-dos.js) et la Note logique
+// de service DMT Hub — le code FP-* correspondant est en commentaire.
+enum OperationType {
+  ICD_FULL // FP-ICD-001 — Stockage conteneurs pleins
+  ICD_EMPTY // FP-ICD-002 — Stockage conteneurs vides
+  ICD_OUT // FP-ICD-003 — Sortie de conteneurs
+  ENT_IN // FP-ENT-001 — Réception et mise en entrepôt
+  ENT_OUT // FP-ENT-002 — Sortie de marchandises d'entrepôt
+  DEP_TRANS // FP-DEP-001 — Dépotage avec transbordement
+  DEP_STOCK // FP-DEP-002 — Dépotage avec mise en stock
+  EMP_EXPORT // FP-EMP-001 — Empotage (export)
+  LOAD_EXPORT // FP-EMP-002 — Chargement conventionnel (export)
+}
+
+// Statuts standard du cahier des charges (15 codes + cycle de validation
+// hiérarchique N+1), scopés par opération — pas par dossier. Aligné sur
+// DOS_STATUS (lib/data/data-dos.js).
+enum OperationStatus {
+  DRAFT // en saisie, pas encore soumis
+  PRE_ALERTE
+  TO_VALIDATE // soumis, en attente de validation N+1
+  REJECTED // rejeté par le N+1 — retour en saisie
+  DOSSIER_CREE
+  CAPACITE_VALIDEE
+  AUTORISE_ENTREE
+  GATE_IN
+  DOCUMENTS_VALIDES
+  EN_OPERATION
+  EN_STOCK
+  ORDRE_SORTIE
+  VALIDATION_FINANCE
+  VALIDATION_DEX
+  LIBERE_SORTIE
+  GATE_OUT
+  SORTI
+  DOSSIER_CLOS
+}
+
+enum OperationLineRole {
+  INPUT
+  OUTPUT
+}
+
+enum ExitMovementStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+// ─────────────────────────────────────────────
+// MODALITÉS DE PAIEMENT (WMS + YMS)
+// ─────────────────────────────────────────────
+
+enum PaymentTermType {
+  AT_PICKUP // paiement au enlèvement — bloque la sortie tant que non validé
+  ON_CREDIT // paiement à terme — délai accordé (ex: 30 jours), ne bloque jamais la sortie
+}
+
+enum PaymentStatus {
+  PENDING
+  VALIDATED
+}
+
+// Moyen de règlement effectif — distinct de termType (AT_PICKUP/ON_CREDIT,
+// QUAND on paie) : ceci décrit COMMENT. Sert notamment au calcul du timbre
+// fiscal (InvoicesService.computeTotals()) : 1% du sous-total en espèces
+// uniquement, aucun timbre pour les autres moyens.
+enum PaymentMethod {
+  CASH // espèces
+  BANK_TRANSFER // virement bancaire
+  CHECK // chèque
+}
+
+// Un seul Payment par ShipmentFile ou par PreGate (jamais les deux) — validation
+// manuelle par un directeur (ADMIN/SUPER_ADMIN) requise pour AT_PICKUP avant Gate OUT.
+model Payment {
+  id            String          @id @default(cuid())
+  tenantId      String
+  termType      PaymentTermType
+  method        PaymentMethod? // saisi à la création du dossier (StepFinance) — nullable : jamais renseigné pour les Payment plus anciens
+  status        PaymentStatus   @default(PENDING)
+  dueDate       DateTime? // délai de paiement accordé si ON_CREDIT (ex: +30j)
+  validatedAt   DateTime?
+  validatedById String? // userId du directeur ayant validé
+  notes         String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  shipmentFile   ShipmentFile?
+  preGate        PreGate?
+  yardContainers YardContainer[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@map("payments")
+}
+
+// Note: la FK inverse (paymentId) est portée par ShipmentFile, PreGate et YardContainer ci-dessus/dessous.
+
+model ShipmentFile {
+  id                    String             @id @default(cuid())
+  tenantId              String
+  clientId              String? // FK vers Tenant type=CLIENT
+  defaultYardId         String? // yard par défaut pré-sélectionné pour les lignes (suggestion, non contraignant)
+  // Choix "Assujetti TVA" fait à l'étape Finance de la création (ou modifié
+  // depuis l'onglet Finance du détail) — repris par défaut à l'émission de
+  // facture (InvoicesService.issue()), sans empêcher un override ponctuel
+  // via le paramètre `vat` de l'endpoint.
+  vatApplicable         Boolean            @default(true)
+  voyageCode            String
+  clientRef             String?
+  invoiceNumber         String?
+  transportDocNumber    String?
+  // FK composites vers les référentiels du même tenant
+  shipmentTypeCode      String
+  storageRegimeCode     String
+  customsDeclNumber     String?
+  customsDeclDate       DateTime?
+  sommierExpiryDate     DateTime?
+  // Prorogation sommier
+  sommierOriginalDate   DateTime? // date expiry avant toute prorogation
+  sommierExtendedAt     DateTime? // quand la prorogation a été faite
+  sommierExtendedBy     String? // userId
+  sommierExtensionsUsed Int                @default(0)
+  eta                   DateTime?
+  entryDate             DateTime?
+  status                ShipmentFileStatus @default(DRAFT)
+  notes                 String?
+  driverName            String?
+  driverPhone           String?
+  truckPlate            String?
+  targetLocation        String?
+  putawayNote           String?
+  putawayConfirmedAt    DateTime?
+  putawayConfirmedBy    String?
+  // Liaison dépotage — dossier WMS créé depuis un conteneur en yard (YMS).
+  // Plusieurs dossiers peuvent en théorie référencer le même conteneur
+  // (dépotage partiel en plusieurs lots), donc 1-N côté YardContainer.
+  yardContainerId       String?
+  // Modalités de paiement — un seul Payment pour tout le dossier
+  paymentId             String?            @unique
+  // Blocage comptable AU NIVEAU DOSSIER (distinct du blocage client porté
+  // par ClientAccountingBlock) — un dossier individuel peut être bloqué par
+  // le DEX même si son client ne l'est pas globalement. Miroir de
+  // d.blocked côté frontend (dos-store.js blockDossier()/unblockDossier()).
+  blockedReason         String?
+  blockedById           String?
+  blockedAt             DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  tenant        Tenant                    @relation(fields: [tenantId], references: [id])
+  client        Tenant?                   @relation("ShipmentFileClient", fields: [clientId], references: [id])
+  defaultYard   Yard?                     @relation(fields: [defaultYardId], references: [id])
+  shipmentType  ShipmentTypeRef           @relation(fields: [tenantId, shipmentTypeCode], references: [tenantId, code])
+  storageRegime StorageRegimeRef          @relation(fields: [tenantId, storageRegimeCode], references: [tenantId, code])
+  payment       Payment?                  @relation(fields: [paymentId], references: [id])
+  yardContainer YardContainer?            @relation(fields: [yardContainerId], references: [id])
+  lines         ShipmentLine[]
+  exitMovements ExitMovement[]
+  receipts      ShipmentReceipt[]
+  operations    Operation[]
+  serviceLines  ShipmentFileServiceLine[]
+  documents     ShipmentFileDocument[]
+  invoice       Invoice?
+  auditLogs     ShipmentFileAuditLog[]
+  tmsTrips      TmsTrip[]
+  truckVisits   GateTruckVisit[]
+
+  @@index([tenantId])
+  @@index([defaultYardId])
+  @@index([status])
+  @@index([paymentId])
+  @@index([yardContainerId])
+  @@map("shipment_files")
+}
+
+model ShipmentReceipt {
+  id                 String   @id @default(cuid())
+  shipmentFileId     String
+  entryDate          DateTime
+  transportDocNumber String? // BL / LTA / CMR
+  driverName         String?
+  driverPhone        String?
+  truckPlate         String?
+  targetLocation     String?
+  notes              String?
+  comments           String? // commentaire libre agent réception
+  createdAt          DateTime @default(now())
+
+  shipmentFile ShipmentFile   @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  lines        ShipmentLine[]
+
+  @@index([shipmentFileId])
+  @@map("shipment_receipts")
+}
+
+model ShipmentLine {
+  id              String             @id @default(cuid())
+  shipmentFileId  String
+  tenantId        String // dénormalisé pour la FK composite packageType
+  packageRef      String
+  packageTypeCode String             @default("OTHER")
+  packageCount    Int? // nombre de colis physiques (palettes, cartons…)
+  quantity        Int                @default(1) // nb d'articles/unités par colis
+  quantityOut     Int                @default(0) // total sorti sur toutes les sorties
+  // Pointage contradictoire par référence (dépotage) : quantité constatée.
+  countedQuantity Int?
+  countedAt       DateTime?
+  description     String? // description libre du contenu
+  weightKg        Float?
+  volumeM3        Float?
+  surfaceM2       Float?
+  yardId          String? // yard physique où est stocké ce colis
+  zoneId          String? // zone précise dans le yard
+  receiptId       String? // réception partielle qui a physiquement réceptionné ce colis
+  status          ShipmentLineStatus @default(PENDING)
+  createdAt       DateTime           @default(now())
+
+  shipmentFile   ShipmentFile       @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  packageType    PackageTypeRef     @relation(fields: [tenantId, packageTypeCode], references: [tenantId, code])
+  yard           Yard?              @relation(fields: [yardId], references: [id])
+  zone           StorageZone?       @relation(fields: [zoneId], references: [id])
+  receipt        ShipmentReceipt?   @relation(fields: [receiptId], references: [id])
+  exitLines      ExitMovementLine[]
+  operationLines OperationLine[]
+
+  @@index([receiptId])
+  @@index([shipmentFileId])
+  @@index([status])
+  @@index([yardId])
+  @@index([zoneId])
+  @@map("shipment_lines")
+}
+
+model ExitMovement {
+  id                   String             @id @default(cuid())
+  shipmentFileId       String // dénormalisé — conservé pour compat des requêtes existantes
+  operationId          String? // opération ENT_OUT ou LOAD_EXPORT porteuse de ce mouvement ;
+  // nullable pendant la période de backfill, à terme obligatoire (voir claude.md)
+  tenantId             String // dénormalisé pour la FK composite exitShipmentType
+  status               ExitMovementStatus @default(DRAFT)
+  // Étape 1 — Bon de livraison
+  deliveryOrderRef     String?
+  exitDate             DateTime?
+  exitShipmentTypeCode String?
+  exitVoyageCode       String?
+  exitCustomsDecl      String?
+  exitTransportDoc     String?
+  // Étape 3 — Chargement / Gate-out
+  truckPlate           String?
+  driverName           String?
+  driverPhone          String?
+  gateOutAt            DateTime?
+  gateOutBy            String?
+  // Commun
+  notes                String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  shipmentFile     ShipmentFile       @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  operation        Operation?         @relation(fields: [operationId], references: [id], onDelete: SetNull)
+  exitShipmentType ShipmentTypeRef?   @relation("ExitMovementShipmentType", fields: [tenantId, exitShipmentTypeCode], references: [tenantId, code])
+  exitLines        ExitMovementLine[]
+
+  @@index([shipmentFileId])
+  @@index([operationId])
+  @@index([status])
+  @@map("exit_movements")
+}
+
+// Table pivot : quels colis sortent sur ce mouvement, et en quelle quantité
+model ExitMovementLine {
+  id             String   @id @default(cuid())
+  exitMovementId String
+  shipmentLineId String
+  quantityOut    Int // nb d'unités sorties sur ce mouvement
+  note           String? // ex: "Carton n°1 — 150 pcs"
+  createdAt      DateTime @default(now())
+
+  exitMovement ExitMovement @relation(fields: [exitMovementId], references: [id], onDelete: Cascade)
+  shipmentLine ShipmentLine @relation(fields: [shipmentLineId], references: [id], onDelete: Restrict)
+
+  @@index([exitMovementId])
+  @@index([shipmentLineId])
+  @@map("exit_movement_lines")
+}
+
+// ─────────────────────────────────────────────
+// OPÉRATIONS — pipeline multi-opérations d'un dossier
+// ─────────────────────────────────────────────
+// Un ShipmentFile peut porter plusieurs Operation successives (ex: stockage
+// conteneur → dépotage-mise en stock → empotage export). Chaque Operation a
+// son propre type/pipeline/statut ; la filiation entre opérations se fait au
+// niveau ligne/item via OperationLine (voir claude.md côté frontend,
+// section OPÉRATIONS ET PIPELINE).
+model Operation {
+  id               String          @id @default(cuid())
+  shipmentFileId   String
+  tenantId         String
+  type             OperationType
+  status           OperationStatus @default(DRAFT)
+  createdAt        DateTime        @default(now())
+  closedAt         DateTime?
+  // Cycle de validation hiérarchique N+1 (DRAFT → TO_VALIDATE →
+  // DOSSIER_CREE|REJECTED) — s'applique à l'Operation initiale créée avec
+  // le dossier. Miroir de `d.validation` côté frontend (dos-store.js).
+  submittedAt      DateTime?
+  submittedById    String? // userId ayant soumis pour validation
+  decidedAt        DateTime?
+  decidedById      String? // userId ayant validé/rejeté (le N+1)
+  decisionComment  String?
+  // Blocages §15 avant sortie (opérations dir=OUT) : la dernière étape du
+  // pipeline exige validation Finance (Payment.status=VALIDATED, via
+  // ShipmentFile.payment) PUIS validation DEX. Le modèle DEX complet
+  // (signature/cachet/mention) reste à construire — ces deux champs sont un
+  // flag minimal en attendant, miroir de `d.finance.dexValidation` côté
+  // frontend (dos-store.js).
+  dexValidatedAt   DateTime?
+  dexValidatedById String?
+
+  // Bon à Entrer (BAE) — émis à l'étape "Autorisation d'entrée" une fois les
+  // trois contrôles cochés (contrat/compte client/devis) et Tenant.contractOk
+  // vérifié. Miroir de authorizeEntry()/d.stepData.entry_auth côté frontend
+  // (dos-store.js). Un seul BAE actif par Operation.
+  bonNumber        String?
+  bonIssuedAt      DateTime?
+  bonIssuedById    String?
+  bonCheckContract Boolean?
+  bonCheckAccount  Boolean?
+  bonCheckQuote    Boolean?
+
+  // Facturation du séjour — démarrée à la mise en emplacement (placement),
+  // arrêtée au Gate Out (finalisation). Miroir de d.finance.storage côté
+  // frontend (dos-store.js startStorageBilling()/finalizeBilling()).
+  storageBillingStartedAt DateTime?
+  storageFreetimeDays     Int?
+  storageBillingEndedAt   DateTime?
+  storageBillableDays     Int?
+
+  shipmentFile       ShipmentFile         @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  lines              OperationLine[]
+  exitMovements      ExitMovement[]
+  gatePasses         GatePass[]
+  entryPassEmails    EntryPassEmail[]
+  slotChangeRequests SlotChangeApproval[]
+
+  @@index([shipmentFileId])
+  @@index([tenantId])
+  @@index([status])
+  @@map("operations")
+}
+
+// Envoi du Bon à Entrer par e-mail — journal des envois (destinataires, cc,
+// message). Miroir de bon.emails[] côté frontend (dos-store.js
+// emailEntryPass()). TODO : l'envoi effectif passe par MailService
+// (Resend) — non câblé ici, l'infra de templating HTML dédiée au BAE reste
+// à construire ; pour l'instant on ne fait que persister l'événement d'envoi.
+model EntryPassEmail {
+  id          String   @id @default(cuid())
+  operationId String
+  to          String[]
+  cc          String[]
+  message     String?
+  sentAt      DateTime @default(now())
+  sentById    String?
+
+  operation Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+
+  @@index([operationId])
+  @@map("entry_pass_emails")
+}
+
+// Passage Gate In — un dossier peut recevoir ses unités en plusieurs
+// passages camion successifs (entrées partielles). Miroir de d.gatePasses[]
+// côté frontend (dos-store.js gateInDossier()). L'étape "Gate In" de
+// l'Operation ne se clôture que lorsque toutes les OperationLine INPUT sont
+// arrivées (voir OperationsService.gateIn()).
+model GatePass {
+  id                      String         @id @default(cuid())
+  operationId             String
+  transportMode           FleetOwnership @default(EXTERNAL)
+  vehicleId               String?
+  driverId                String?
+  truckPlate              String
+  carrier                 String?
+  driverName              String
+  driverCin               String
+  permitNo                String
+  // Ids des OperationLine arrivées sur ce passage précis.
+  arrivedOperationLineIds String[]
+  // Date/heure RÉELLE du passage au Gate — saisie manuelle possible et
+  // corrigeable après coup (voir OperationsService.gateIn()/updateGatePass()),
+  // distincte de createdAt (horodatage technique de l'enregistrement en
+  // base, jamais modifié — intégrité de l'audit). Défaut = now() si non
+  // renseignée à la création.
+  gateInDate              DateTime       @default(now())
+  createdAt               DateTime       @default(now())
+  createdById             String?
+
+  // Visite camion du registre Gate (saisie libre, indépendante du TMS).
+  truckVisitId String?
+
+  operation  Operation       @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  vehicle    TmsVehicle?     @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  driver     TmsDriver?      @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  truckVisit GateTruckVisit? @relation(fields: [truckVisitId], references: [id], onDelete: SetNull)
+
+  @@index([operationId])
+  @@index([vehicleId])
+  @@index([driverId])
+  @@index([truckVisitId])
+  @@map("gate_passes")
+}
+
+// ─────────────────────────────────────────────
+// REGISTRE GATE — camions présentés au poste de garde
+// Séparé du TMS (décision 2026-10-14) : un camion de transporteur tiers est
+// saisi librement au Gate et n'est plus créé dans la flotte TMS (qui se
+// remplissait de camions « En mission » jamais libérés). Seuls les camions de
+// la flotte interne gardent un lien TMS (tmsVehicleId), libérés à la sortie.
+// ─────────────────────────────────────────────
+enum GateTruckVisitStatus {
+  ON_SITE
+  EXITED
+}
+
+// Rôle d'un camion dans un transbordement : porteur (apporte les conteneurs
+// pleins) ou récepteur (entre vide pour charger la marchandise transbordée).
+enum GateTruckPurpose {
+  CARRIER
+  RECEIVER
+}
+
+model GateTruckVisit {
+  id             String               @id @default(cuid())
+  tenantId       String
+  plate          String
+  // Immatriculation normalisée (sans espaces/tirets, majuscules) —
+  // « AA 089 VA », « AA-089-VA » et « AA089VA » désignent le même camion.
+  plateNorm      String
+  carrier        String?
+  driverName     String?
+  driverCin      String?
+  permitNo       String?
+  tmsVehicleId   String?
+  // Transbordement : dossier et rôle du camion (null = passage ordinaire).
+  shipmentFileId String?
+  purpose        GateTruckPurpose?
+  status         GateTruckVisitStatus @default(ON_SITE)
+  gateInAt       DateTime             @default(now())
+  gateOutAt      DateTime?
+  createdById    String?
+  createdAt      DateTime             @default(now())
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tmsVehicle   TmsVehicle?   @relation(fields: [tmsVehicleId], references: [id], onDelete: SetNull)
+  shipmentFile ShipmentFile? @relation(fields: [shipmentFileId], references: [id], onDelete: SetNull)
+  gatePasses   GatePass[]
+  truckLoads   TruckLoad[]
+
+  @@index([tenantId, plateNorm])
+  @@index([tenantId, status])
+  @@index([shipmentFileId])
+  @@map("gate_truck_visits")
+}
+
+// ─────────────────────────────────────────────
+// CHARGEMENTS CAMION — chargements partiels multi-conteneurs
+// Un camion (TruckLoad) peut emporter une partie de la marchandise de
+// plusieurs conteneurs/dossiers ; un conteneur peut être réparti sur
+// plusieurs camions (TruckLoadLine.quantity). Traçabilité jusqu'à la sortie
+// et la livraison (deliveryRef / deliveredAt).
+// ─────────────────────────────────────────────
+enum TruckLoadStatus {
+  LOADED // chargé, encore sur le site (attente douane / sortie)
+  EXITED // sorti du site
+  DELIVERED // livraison confirmée
+  CANCELLED
+}
+
+model TruckLoad {
+  id           String          @id @default(cuid())
+  tenantId     String
+  plate        String
+  plateNorm    String
+  carrier      String?
+  driverName   String?
+  driverCin    String?
+  permitNo     String?
+  destination  String?
+  // Bon de livraison / référence de livraison remis au chauffeur.
+  deliveryRef  String?
+  status       TruckLoadStatus @default(LOADED)
+  loadedAt     DateTime        @default(now())
+  gateOutAt    DateTime?
+  deliveredAt  DateTime?
+  notes        String?
+  truckVisitId String?
+  createdById  String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  tenant     Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  truckVisit GateTruckVisit? @relation(fields: [truckVisitId], references: [id], onDelete: SetNull)
+  lines      TruckLoadLine[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, plateNorm])
+  @@map("truck_loads")
+}
+
+model TruckLoadLine {
+  id              String   @id @default(cuid())
+  truckLoadId     String
+  operationLineId String
+  // Dénormalisés pour la traçabilité et les listes (dossier, conteneur).
+  operationId     String
+  shipmentFileId  String
+  yardContainerId String?
+  quantity        Int
+  createdAt       DateTime @default(now())
+
+  truckLoad     TruckLoad     @relation(fields: [truckLoadId], references: [id], onDelete: Cascade)
+  operationLine OperationLine @relation(fields: [operationLineId], references: [id], onDelete: Cascade)
+
+  @@index([truckLoadId])
+  @@index([operationLineId])
+  @@index([shipmentFileId])
+  @@map("truck_load_lines")
+}
+
+enum FleetOwnership {
+  INTERNAL
+  EXTERNAL
+}
+
+enum TmsVehicleStatus {
+  AVAILABLE
+  IN_USE
+  MAINTENANCE
+  INACTIVE
+}
+
+enum TmsDriverStatus {
+  AVAILABLE
+  IN_USE
+  OFF_DUTY
+  INACTIVE
+}
+
+enum TmsCargoType {
+  CONTAINER
+  PACKAGE
+  BOTH
+}
+
+// Référentiel TMS des véhicules internes et externes. Les véhicules externes
+// peuvent être créés directement au Gate ; les véhicules internes sont
+// sélectionnés dans la flotte disponible.
+model TmsVehicle {
+  id              String           @id @default(cuid())
+  tenantId        String
+  plate           String
+  ownership       FleetOwnership   @default(INTERNAL)
+  carrier         String?
+  brand           String?
+  model           String?
+  vehicleType     String           @default("CAMION")
+  cargoType       TmsCargoType     @default(BOTH)
+  capacityTons    Float?
+  status          TmsVehicleStatus @default(AVAILABLE)
+  currentDriverId String?
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  currentDriver   TmsDriver?       @relation("CurrentVehicleDriver", fields: [currentDriverId], references: [id], onDelete: SetNull)
+  assignedDrivers TmsDriver[]      @relation("AssignedVehicleDriver")
+  gatePasses      GatePass[]
+  trips           TmsTrip[]
+  gateTruckVisits GateTruckVisit[]
+
+  @@unique([tenantId, plate])
+  @@index([tenantId, ownership, status])
+  @@index([currentDriverId])
+  @@map("tms_vehicles")
+}
+
+// Chauffeurs de la flotte interne et chauffeurs externes enregistrés au Gate.
+model TmsDriver {
+  id                String          @id @default(cuid())
+  tenantId          String
+  ownership         FleetOwnership  @default(INTERNAL)
+  firstName         String
+  lastName          String
+  phone             String?
+  cin               String
+  permitNo          String
+  permitCategory    String?
+  permitExpiresAt   DateTime?
+  status            TmsDriverStatus @default(AVAILABLE)
+  assignedVehicleId String?
+  isActive          Boolean         @default(true)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedVehicle TmsVehicle?  @relation("AssignedVehicleDriver", fields: [assignedVehicleId], references: [id], onDelete: SetNull)
+  currentVehicles TmsVehicle[] @relation("CurrentVehicleDriver")
+  gatePasses      GatePass[]
+  trips           TmsTrip[]
+
+  @@unique([tenantId, cin])
+  @@index([tenantId, ownership, status])
+  @@index([assignedVehicleId])
+  @@map("tms_drivers")
+}
+
+enum TmsTripType {
+  DISTRIBUTION
+  PORT_SHUTTLE
+}
+
+enum TmsTripStatus {
+  PLANNED
+  IN_PROGRESS
+  DELIVERED
+  CANCELLED
+}
+
+enum TmsLegKind {
+  EXPORT
+  IMPORT
+  EMPTY
+  NONE
+}
+
+enum TmsPortWindowStatus {
+  PLANNED
+  OPEN
+  CLOSED
+}
+
+// Tournée TMS réelle. Distribution et rotation portuaire partagent ainsi
+// flotte, chauffeur, cargaison, chronologie, carburant et preuve de livraison.
+model TmsTrip {
+  id                String        @id @default(cuid())
+  tenantId          String
+  code              String
+  type              TmsTripType   @default(DISTRIBUTION)
+  status            TmsTripStatus @default(PLANNED)
+  vehicleId         String
+  driverId          String
+  shipmentFileId    String?
+  clientName        String?
+  destination       String?
+  scheduledStart    DateTime
+  estimatedEnd      DateTime?
+  actualStart       DateTime?
+  actualEnd         DateTime?
+  distanceKm        Float?
+  stops             Int           @default(1)
+  operationLineIds  String[]      @default([])
+  cargoLabels       String[]      @default([])
+  podSignedAt       DateTime?
+  podRecipient      String?
+  fuelTheoL         Float?
+  fuelRealL         Float?
+  outboundKind      TmsLegKind    @default(NONE)
+  outboundContainer String?
+  outboundWindowId  String?
+  returnKind        TmsLegKind    @default(NONE)
+  returnContainer   String?
+  returnWindowId    String?
+  notes             String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vehicle        TmsVehicle     @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  driver         TmsDriver      @relation(fields: [driverId], references: [id], onDelete: Restrict)
+  shipmentFile   ShipmentFile?  @relation(fields: [shipmentFileId], references: [id], onDelete: SetNull)
+  outboundWindow TmsPortWindow? @relation("TripOutboundWindow", fields: [outboundWindowId], references: [id], onDelete: SetNull)
+  returnWindow   TmsPortWindow? @relation("TripReturnWindow", fields: [returnWindowId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, code])
+  @@index([tenantId, type, status])
+  @@index([vehicleId])
+  @@index([driverId])
+  @@index([shipmentFileId])
+  @@index([scheduledStart])
+  @@map("tms_trips")
+}
+
+model TmsPortWindow {
+  id         String              @id @default(cuid())
+  tenantId   String
+  code       String
+  slotStart  DateTime
+  slotEnd    DateTime
+  kind       TmsLegKind
+  vessel     String?
+  booked     Int                 @default(0)
+  used       Int                 @default(0)
+  status     TmsPortWindowStatus @default(PLANNED)
+  externalId String?
+  syncedAt   DateTime?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  outboundTrips TmsTrip[] @relation("TripOutboundWindow")
+  returnTrips   TmsTrip[] @relation("TripReturnWindow")
+
+  @@unique([tenantId, code])
+  @@index([tenantId, slotStart])
+  @@index([status])
+  @@map("tms_port_windows")
+}
+
+enum SlotChangeStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Changement d'emplacement (yard ou entrepôt) sur une OperationLine déjà
+// placée — appliqué immédiatement si l'auteur est le créateur du dossier ou
+// un rôle DEX/ADMIN/SUPER_ADMIN, sinon mis en file d'approbation. Miroir de
+// d.approvals[]/requestSlotChange()/decideApproval() côté frontend
+// (dos-store.js). requestedSlot est un JSON libre {block,bay,row,tier} ou
+// {warehouse,zone,surfaceM2} selon le mode (yard vs entrepôt) — même forme
+// que le payload de CapacityReservationDto.
+model SlotChangeApproval {
+  id              String           @id @default(cuid())
+  operationId     String
+  operationLineId String
+  fromSlot        Json?
+  toSlot          Json
+  reason          String?
+  status          SlotChangeStatus @default(PENDING)
+  requestedById   String
+  requestedAt     DateTime         @default(now())
+  decidedById     String?
+  decidedAt       DateTime?
+  comment         String?
+
+  operation     Operation     @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  operationLine OperationLine @relation(fields: [operationLineId], references: [id], onDelete: Cascade)
+
+  @@index([operationId])
+  @@index([operationLineId])
+  @@index([status])
+  @@map("slot_change_approvals")
+}
+
+// Pivot générique : items (ligne WMS ou conteneur YMS) consommés (INPUT) ou
+// produits (OUTPUT) par une Operation. Exactement un de shipmentLineId /
+// yardContainerId doit être renseigné.
+model OperationLine {
+  id                 String            @id @default(cuid())
+  operationId        String
+  shipmentLineId     String?
+  yardContainerId    String?
+  role               OperationLineRole
+  quantity           Int?
+  // Colis ATTENDUS pour cette unité (nb de colis du conteneur, saisi à la
+  // création du dossier) — référence du pointage contradictoire, du rapport
+  // de dépotage et des chargements camions. `quantity` = colis CONSTATÉS.
+  expectedQuantity   Int?
+  // Nature de la cargaison pour CETTE opération de dépotage/empotage —
+  // Vrac | Conventionnel. Caractéristique du dépotage/empotage en cours,
+  // pas du conteneur lui-même (règle §5 de la Note logique de service DMT
+  // Hub : taille + nature obligatoires pour résoudre la prestation induite
+  // correspondante). Renseigné uniquement sur les OperationLine de type
+  // DEP_TRANS/DEP_STOCK/EMP_EXPORT/LOAD_EXPORT portant un yardContainerId.
+  cargoNature        String?
+  // Avancement de CETTE unité dans le pipeline d'étapes de l'Operation
+  // (OPERATION_TYPE_CFG[type].steps) — miroir de `l.ops[opId]` côté
+  // frontend (dos-store.js). stepIdx = index de la prochaine étape à
+  // franchir ; done = toutes les étapes franchies.
+  stepIdx            Int               @default(0)
+  done               Boolean           @default(false)
+  // Emplacement affecté à cette unité — yard (block/bay/row/tier) ou
+  // entrepôt (warehouse/zone/surfaceM2), selon le mode de réservation de
+  // capacité (voir CapacityReservationDto). Miroir de l.slot côté frontend
+  // (dos-store.js). Modifié via advance(kind='placement'|'slot') ou, après
+  // premier placement, via le flux d'approbation SlotChangeApproval.
+  slot               Json?
+  // Rattachement automatique du camion transportant cette unité — renseigné
+  // via advance(data.loadplan), typiquement à l'étape "Gate In véhicule"
+  // d'une opération sortante. Miroir de l.truck côté frontend (dos-store.js
+  // executeOpStep()).
+  truckPlate         String?
+  truckCarrier       String?
+  truckAssignedAt    DateTime?
+  // Camion de reprise (Camion B) — distinct du camion Gate In (Camion A).
+  // Renseigné à l'étape « Chargement camion » / transbordement FP-DEP-001,
+  // jamais en écrasant truckPlate (entrée). Miroir de l.pickupTruck côté
+  // frontend. pickupLoadedAt démarre le séjour « en attente douane ».
+  pickupTruckPlate   String?
+  pickupTruckCarrier String?
+  pickupDriverName   String?
+  pickupDriverCin    String?
+  pickupPermitNo     String?
+  pickupLoadedAt     DateTime?
+  // Contrôle du plomb effectué sur CE conteneur (étape "Contrôle plomb" de
+  // DEP_TRANS/DEP_STOCK) — sealRead est le n° réellement relevé sur le
+  // terrain, comparé à YardContainer.sealNumber (attendu). Miroir de
+  // data.seals[] côté frontend (dos-store.js executeOpStep(), op-procedures.jsx).
+  sealRead           String?
+  sealState          String?
+  sealWitness        String?
+  sealCheckedAt      DateTime?
+  // Contrôle qualité/quantité effectué sur CETTE unité (étape "Contrôle
+  // qualité" de DEP_STOCK, "Contrôle - Pointage" de DEP_TRANS…) — result est
+  // le résultat du contrôle (Conforme|Conforme avec réserves|Non conforme),
+  // nc la référence de fiche de non-conformité si applicable. Miroir de
+  // data.qualityChecks[] côté frontend (dos-store.js executeOpStep(),
+  // op-procedures.jsx) — même principe que sealRead ci-dessus.
+  qualityResult      String?
+  qualityNc          String?
+  qualityCheckedAt   DateTime?
+  // Document d'opération émis pour CETTE unité (étape "Émission du
+  // document" — BR/BS selon le sens de l'opération). Miroir de
+  // data.docs[] côté frontend (op-procedures.jsx, kind='doc').
+  docNumber          String?
+  docSentTo          String?
+  docIssuedAt        DateTime?
+  // Rapport contradictoire (étape "Rapport d'opération" — RD/RE) — reprend
+  // le même principe attendu/constaté que le pointage (quantity ci-dessus),
+  // mais avec ses propres signatures et n° de rapport, distincts du
+  // comptage de picking. Miroir de data.reports[] côté frontend.
+  reportNumber       String?
+  reportReceived     Int?
+  reportSignDmt      String?
+  reportSignThird    String?
+  reportIssuedAt     DateTime?
+  // Gate Out réel — chauffeur et destination au moment de la sortie
+  // (truckPlate/truckCarrier déjà posés à l'étape "Gate In véhicule", voir
+  // ci-dessus). Miroir de data.gateOut côté frontend.
+  gateOutDriver      String?
+  gateOutDestination String?
+  gateOutAt          DateTime?
+  // Moyens mobilisés à la DERNIÈRE étape franchie par cette unité (engin de
+  // manutention, équipe de déchargement/dépotage/empotage) — valeur
+  // courante pour l'affichage. L'historique complet, étape par étape, est
+  // dans OperationStepLog (mêmes colonnes).
+  equipmentName      String?
+  handlingCrewType   HandlingCrewType?
+  handlingCrewCount  Int?
+  // Mise à terre (déchargement du conteneur du camion au sol) — horodatage
+  // de l'étape « Mise à terre » des flux ICD/dépotage.
+  groundedAt         DateTime?
+  createdAt          DateTime          @default(now())
+
+  operation          Operation            @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  shipmentLine       ShipmentLine?        @relation(fields: [shipmentLineId], references: [id], onDelete: Cascade)
+  yardContainer      YardContainer?       @relation(fields: [yardContainerId], references: [id], onDelete: Cascade)
+  stepLogs           OperationStepLog[]
+  slotChangeRequests SlotChangeApproval[]
+  truckLoadLines     TruckLoadLine[]
+
+  @@index([operationId])
+  @@index([shipmentLineId])
+  @@index([yardContainerId])
+  @@map("operation_lines")
+}
+
+// Journal d'avancement d'une OperationLine — un événement par franchissement
+// d'étape. Miroir de `l.ops[opId].log[]` côté frontend (dos-store.js),
+// utilisé pour reconstituer qui a fait quoi/quand sur une unité de
+// cargaison (traçabilité — bénéfice attendu §7 de la Note logique de
+// service DMT Hub).
+// Équipe de manutention mobilisée sur une étape (déchargement, dépotage,
+// empotage) : dockers (nombre obligatoire) ou manœuvres externes (sans nombre).
+enum HandlingCrewType {
+  DOCKERS
+  EXTERNAL_LABOR
+}
+
+model OperationStepLog {
+  id                String            @id @default(cuid())
+  operationLineId   String
+  stepIdx           Int // index de l'étape franchie (dans OPERATION_TYPE_CFG[type].steps)
+  stepLabel         String // dénormalisé — reste lisible même si le catalogue d'étapes évolue
+  kind              String // 'confirm' | 'finance' | 'dex' | 'gateout' | 'rewind' | … (nature de l'action)
+  byId              String? // userId ayant réalisé l'action
+  // Moyens mobilisés pour CETTE étape (voir OperationLine.equipmentName…).
+  equipmentName     String?
+  handlingCrewType  HandlingCrewType?
+  handlingCrewCount Int?
+  // Instantané des valeurs écrasées par l'étape (ex. ancien n° de plomb) —
+  // permet un retour à l'étape précédente fiable (kind='rewind').
+  data              Json?
+  // Motif obligatoire d'un retour à l'étape précédente (kind='rewind').
+  reason            String?
+  // Date/heure RÉELLE de réalisation de l'étape, saisie par l'opérateur
+  // (null = createdAt). Affichée dans l'historique et les dates du dossier.
+  performedAt       DateTime?
+  createdAt         DateTime          @default(now())
+
+  operationLine OperationLine @relation(fields: [operationLineId], references: [id], onDelete: Cascade)
+
+  @@index([operationLineId])
+  @@map("operation_step_logs")
+}
+
+// ─────────────────────────────────────────────
+// TRANSPORTEURS, DEX & BLOCAGE COMPTABLE
+// Trois briques de paramétrage DOS identifiées sans équivalent backend —
+// miroir de dos-config-store.js (carriers/dex/blocked) côté frontend.
+// ─────────────────────────────────────────────
+
+// Référentiel transporteurs — créable à la volée depuis le Gate (ex:
+// pendant une saisie de Gate In), miroir de DosConfig.carriers()/addCarrier().
+model CarrierRef {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("carrier_refs")
+}
+
+// Engin de manutention (reachstacker, chariot élévateur, transpalette…) —
+// référentiel Paramétrage DOS, affiché en liste déroulante dans les étapes
+// d'exécution (OP_STEP_SPECS, op-procedures.jsx, champ "Engin de manutention").
+model HandlingEquipmentRef {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("handling_equipment_refs")
+}
+
+// Profil DEX (Direction Exploitation) d'un tenant — nom, titre, signature/
+// cachet apposés sur les bons de sortie, mention légale. Un seul profil
+// actif par tenant (contrainte @unique sur tenantId) — miroir de
+// DosConfig.dex()/setDex().
+model DexProfile {
+  id           String   @id @default(cuid())
+  tenantId     String   @unique
+  name         String
+  title        String   @default("Directeur(trice) Exploitation")
+  signatureUrl String? // image de signature (MinIO)
+  stampUrl     String? // image de cachet (MinIO)
+  mention      String   @default("Bon pour sortie — Direction Exploitation")
+  updatedAt    DateTime @updatedAt
+  updatedById  String?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("dex_profiles")
+}
+
+// Blocage comptable d'un client (Tenant type=CLIENT) — empêche toute
+// création de dossier/opération pour ce client tant qu'il n'est pas
+// débloqué. Levée réservée au rôle DEX. Miroir de DosConfig.blockClient()/
+// unblockClient()/isClientBlocked(). Au plus un blocage actif par client
+// (le tenant bloquant est l'opérateur, ex: DMT — un client peut en théorie
+// être bloqué par plusieurs opérateurs distincts s'il travaille avec
+// plusieurs d'entre eux, d'où l'unicité sur (tenantId, clientId) plutôt
+// que sur clientId seul).
+model ClientAccountingBlock {
+  id          String   @id @default(cuid())
+  tenantId    String // opérateur ayant posé le blocage (ex: DMT)
+  clientId    String // Tenant type=CLIENT concerné
+  reason      String
+  blockedById String
+  blockedAt   DateTime @default(now())
+
+  tenant Tenant @relation("ClientAccountingBlockOperator", fields: [tenantId], references: [id], onDelete: Cascade)
+  client Tenant @relation("ClientAccountingBlockClient", fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, clientId])
+  @@index([tenantId])
+  @@index([clientId])
+  @@map("client_accounting_blocks")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS — templates & historique d'envoi
+// NotificationsModule ne branche PAS réellement Twilio (SMS)/SendGrid
+// (Email) ici — la persistance (templates, déclencheurs, historique) est
+// complète et fonctionnelle, mais NotificationsService.send() (à venir,
+// hors périmètre de ce chantier) est le seul point d'intégration à écrire
+// pour un envoi réel ; en attendant, un "envoi" ne fait que journaliser
+// l'événement avec un statut simulé. Miroir de NOTIF_TEMPLATES/
+// NOTIF_HISTORY côté frontend (lib/data/data-ywms.js).
+// ─────────────────────────────────────────────
+
+enum NotifChannel {
+  SMS
+  EMAIL
+  PUSH
+}
+
+enum NotifStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model NotificationTemplate {
+  id         String         @id @default(cuid())
+  tenantId   String
+  name       String
+  trigger    String // ex: "Pré-alerte reçue", "Facture émise" — libellé libre, pas d'enum fermé
+  channels   NotifChannel[] // un template peut viser plusieurs canaux à la fois
+  recipients String // libellé libre ("Client + Transporteur", etc.) — pas de ciblage structuré pour l'instant
+  body       String // corps du message, variables {{}} non interprétées par ce chantier
+  isActive   Boolean        @default(true)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  tenant Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  logs   NotificationLog[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("notification_templates")
+}
+
+model NotificationLog {
+  id         String       @id @default(cuid())
+  tenantId   String
+  templateId String?
+  channel    NotifChannel
+  to         String // numéro ou email destinataire
+  subject    String?
+  status     NotifStatus  @default(QUEUED)
+  errorMsg   String?
+  sentById   String?
+  createdAt  DateTime     @default(now())
+
+  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  template NotificationTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+  @@map("notification_logs")
+}
+
+// ─────────────────────────────────────────────
+// PRESTATIONS INDUITES & TARIFICATION
+// Référence : Note logique de service DMT Hub — le client ne voit/signe
+// qu'une ligne de Service Mère (une Operation) ; le système résout en
+// arrière-plan la chaîne de Prestations Induites qui lui est rattachée et
+// les agrège au total du dossier. Miroir de DOS_TARIFFS/DOS_SERVICES et
+// INDUCED_SERVICES/OP_INDUCED_MAP côté frontend (lib/data/data-dos.js).
+// ─────────────────────────────────────────────
+
+// Nature du déclenchement d'une prestation induite dans le catalogue.
+enum InducedTrigger {
+  MANDATORY // toujours rattachée à l'opération mère
+  CONDITIONAL // rattachée seulement si une règle métier est satisfaite
+  MANUAL // ligne libre, sans automatisation (ex: "Autre")
+}
+
+// Règle d'évaluation d'une prestation conditionnelle — miroir de
+// ruleSatisfied() dans resolveInducedServices() côté frontend.
+enum InducedRuleWhen {
+  ALWAYS // dès que l'opération est sélectionnée
+  OVER_FRANCHISE // durée de séjour au-delà de la franchise contractuelle du client
+  REGIME_MAD // régime douanier du dossier = MAD
+  REGIME_SPECIAL // régime douanier particulier (ni EF ni LIBRE)
+  EXIT_TRUCK // mode de sortie = camion
+  STUFFED_CONTAINER // empotage réalisé en conteneur (et non en vrac direct)
+  SIZE_NATURE // résolue par taille (20'/40') + nature (Vrac/Conventionnel) — cf. règle §5
+  REGIME_DERIVED // stockage dérivé automatiquement du régime douanier — cf. règle §5
+}
+
+// Grille tarifaire — équivalent DOS_TARIFFS + DOS_SERVICES côté frontend.
+model TariffRef {
+  id            String          @id @default(cuid())
+  tenantId      String
+  code          String
+  domain        String // ICD | Entrepôt | Opérations | Services
+  label         String
+  unit          String // ex: "EVP·jour", "conteneur", "tonne"
+  rate          Int // FCFA, unité entière (pas de centimes — devise sans sous-unité usuelle)
+  // Types d'opération auxquels ce tarif s'applique — miroir de `ops: string[]`
+  // côté mock frontend (DOS_TARIFFS/DOS_SERVICES, lib/data/data-dos.js).
+  // Tableau VIDE = applicable à toutes les opérations (équivalent du
+  // marqueur '*' côté mock — un enum Prisma ne peut pas porter '*' comme
+  // valeur littérale). Distinct du lien TariffRef→InducedServiceRef→
+  // OperationInducedRule.operationType déjà existant : ce dernier ne relie
+  // un tarif à un type d'opération que via une prestation induite précise
+  // (résolution automatique), alors que ce champ pilote l'affichage/filtre
+  // de la grille tarifaire brute (CRUD référentiel), qui n'a pas toujours
+  // de InducedServiceRef en regard (ex: prestations "Services" génériques).
+  applicableOps OperationType[] @default([])
+  // Indépendant de OperationInducedRule.mandatory (qui porte sur la règle
+  // opération→prestation induite, pas sur le tarif lui-même) — sert de
+  // valeur par défaut quand ce tarif est ajouté manuellement à un dossier
+  // (AddServiceModal, dossier-finance.jsx) : n'écrase jamais un mandatory
+  // déjà déterminé par le moteur de résolution automatique.
+  mandatory     Boolean         @default(false)
+  isActive      Boolean         @default(true)
+  sortOrder     Int             @default(0)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  tenant          Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  inducedServices InducedServiceRef[]
+  serviceLines    ShipmentFileServiceLine[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("tariff_refs")
+}
+
+// Catalogue des prestations induites — équivalent INDUCED_SERVICES côté
+// frontend (22 entrées : IS-01 Formalités Douanes … IS-22 Autre).
+model InducedServiceRef {
+  id        String         @id @default(cuid())
+  tenantId  String
+  code      String // ex: IS-07
+  label     String
+  trigger   InducedTrigger
+  tariffId  String? // null = résolue sans tarif direct (ex: dérivée du régime, taille/nature)
+  // Pour les prestations dépotage/empotage résolues par taille+nature
+  // (règle §5 — IS-07..IS-14) : renseigné uniquement sur ces entrées.
+  size      Int? // 20 | 40
+  nature    String? // Vrac | Conventionnel
+  isActive  Boolean        @default(true)
+  sortOrder Int            @default(0)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  tenant Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tariff TariffRef?                @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+  rules  OperationInducedRule[]
+  lines  ShipmentFileServiceLine[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([tariffId])
+  @@map("induced_service_refs")
+}
+
+// Mapping OperationType → prestation induite obligatoire/conditionnelle —
+// équivalent OP_INDUCED_MAP côté frontend (§4 de la note).
+model OperationInducedRule {
+  id               String           @id @default(cuid())
+  tenantId         String
+  operationType    OperationType
+  inducedServiceId String
+  mandatory        Boolean // true = toujours rattachée ; false = conditionnelle
+  when             InducedRuleWhen? // règle de déclenchement si mandatory=false
+  isActive         Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+
+  tenant         Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  inducedService InducedServiceRef @relation(fields: [inducedServiceId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, operationType, inducedServiceId])
+  @@index([tenantId])
+  @@index([inducedServiceId])
+  @@map("operation_induced_rules")
+}
+
+// Ligne de prestation résolue et rattachée à un dossier — équivalent des
+// `fLines` du store frontend (dos-store.js), mais persistée. Générée par
+// la résolution des prestations induites (POST /wms/shipments/:id/induced-services/resolve),
+// modifiable manuellement ensuite (quantité/tarif ajustés, lignes ajoutées
+// depuis la grille tarifaire ou manuelles).
+model ShipmentFileServiceLine {
+  id               String   @id @default(cuid())
+  shipmentFileId   String
+  tenantId         String
+  inducedServiceId String? // null = ligne manuelle ajoutée depuis la grille tarifaire ou "Autre"
+  tariffId         String?
+  label            String // dénormalisé — reste lisible même si le référentiel change ensuite
+  unit             String
+  quantity         Float
+  rate             Int
+  mandatory        Boolean? // null = ligne manuelle, non issue de la résolution automatique — CRITIQUE : resolve() (InducedServicesService) supprime/régénère UNIQUEMENT les lignes où ce champ n'est pas null ; ne jamais le renseigner sur une ligne manuelle sous peine de la voir supprimée au prochain resolve().
+  // Obligatoire/optionnel affiché sur la facture pour une ligne MANUELLE
+  // (mandatory reste null, protégé de resolve()) — dérivé de TariffRef.mandatory
+  // au moment de l'ajout (AddManualServiceLineDto), purement informatif.
+  // Pour une ligne auto-résolue, c'est `mandatory` lui-même qui fait foi.
+  displayMandatory Boolean?
+  ruleLabel        String? // trace de la règle ayant déclenché la ligne (debug/audit)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  shipmentFile   ShipmentFile       @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  tenant         Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  inducedService InducedServiceRef? @relation(fields: [inducedServiceId], references: [id], onDelete: SetNull)
+  tariff         TariffRef?         @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentFileId])
+  @@index([tenantId])
+  @@map("shipment_file_service_lines")
+}
+
+// Contrôle documentaire (Étape 6 du tronc commun, §5). La liste des pièces
+// REQUISES reste un référentiel frontend (OP_TYPES[type].docs, dos-data.js) —
+// dérivée des types d'opération du dossier, pas dupliquée ici. Cette table
+// ne persiste que l'état "contrôlé/fourni" par nom de pièce, au fil de l'eau
+// (upsert par nom via @@unique) ; une ligne peut aussi être ajoutée pour un
+// document ad hoc non prévu par le référentiel statique.
+model ShipmentFileDocument {
+  id             String    @id @default(cuid())
+  shipmentFileId String
+  tenantId       String
+  name           String
+  attached       Boolean   @default(false)
+  attachedAt     DateTime?
+  attachedById   String?
+  blobName       String?
+  originalName   String?
+  mimeType       String?
+  sizeBytes      Int?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  shipmentFile ShipmentFile @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  attachedBy   User?        @relation(fields: [attachedById], references: [id], onDelete: SetNull)
+
+  @@unique([shipmentFileId, name])
+  @@index([tenantId])
+  @@map("shipment_file_documents")
+}
+
+// Journal d'audit d'un dossier — une ligne par mutation HTTP réussie
+// (création, Gate In, facture, sommier, etc.). Source de vérité de
+// l'onglet Historique côté frontend (d.history).
+model ShipmentFileAuditLog {
+  id             String   @id @default(cuid())
+  tenantId       String
+  shipmentFileId String
+  userId         String?
+  action         String
+  label          String
+  method         String
+  path           String
+  field          String?
+  from           String?
+  to             String?
+  payload        Json?
+  createdAt      DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shipmentFile ShipmentFile @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentFileId, createdAt])
+  @@index([tenantId, createdAt])
+  @@map("shipment_file_audit_logs")
+}
+
+// Cycle de la facture métier d'un dossier (distinct de SubscriptionInvoice,
+// qui facture l'abonnement SaaS de la plateforme — jamais réutiliser l'un
+// pour l'autre). Un seul Invoice actif par dossier — regénérée si de
+// nouvelles ShipmentFileServiceLine sont résolues après un premier brouillon.
+// Miroir de `d.finance.{invoiceStatus,invoiceNo,paid,dexValidation,
+// dexRejection}` côté frontend (dos-store.js).
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+}
+
+model Invoice {
+  id                   String        @id @default(cuid())
+  shipmentFileId       String        @unique
+  tenantId             String
+  invoiceNo            String? // ex: FA-2026-0041, attribué à l'émission
+  status               InvoiceStatus @default(DRAFT)
+  // Montants figés au moment de l'émission (snapshot des
+  // ShipmentFileServiceLine à cet instant — ne bouge plus après, même si
+  // des lignes sont ajoutées/modifiées ensuite sur une facture déjà émise).
+  subtotal             Int?
+  vat                  Int?
+  stampDuty            Int?
+  total                Int?
+  issuedAt             DateTime?
+  paidAt               DateTime?
+  // Validation DEX de la facture (préalable à toute sortie §15) — distincte
+  // du flag dexValidatedAt sur Operation (celui-ci valide la sortie
+  // physique, celui-là la facture). Un rejet efface la validation.
+  dexValidatedAt       DateTime?
+  dexValidatedById     String?
+  dexValidationComment String?
+  dexRejectedAt        DateTime?
+  dexRejectedById      String?
+  dexRejectionComment  String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  shipmentFile ShipmentFile @relation(fields: [shipmentFileId], references: [id], onDelete: Cascade)
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("invoices")
+}
+
+// ─────────────────────────────────────────────
+// RÉFÉRENTIELS DYNAMIQUES (WMS)
+// ─────────────────────────────────────────────
+
+model StorageRegimeRef {
+  id                   String   @id @default(cuid())
+  tenantId             String
+  code                 String
+  label                String
+  labelShort           String
+  color                String   @default("#7C5BC7")
+  bg                   String   @default("#F5F0FE")
+  // Sommier
+  sommierDays          Int? // null = pas de sommier applicable
+  alertThresholds      Json     @default("[30, 7, 0]")
+  sommierExtensionDays Int? // durée prorogation en jours (ex: 180)
+  sommierMaxExtensions Int      @default(1)
+  // Champs dynamiques formulaire entrée
+  entryFieldConfig     Json     @default("[]")
+  // Champs dynamiques formulaire sortie
+  exitFieldConfig      Json     @default("[]")
+  // Documents requis (upload/mail)
+  documentConfig       Json     @default("[]")
+  isActive             Boolean  @default(true)
+  sortOrder            Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shipmentFiles ShipmentFile[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("storage_regime_refs")
+}
+
+model ShipmentTypeRef {
+  id        String   @id @default(cuid())
+  tenantId  String
+  code      String
+  label     String
+  icon      String?
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shipmentFiles ShipmentFile[]
+  exitMovements ExitMovement[] @relation("ExitMovementShipmentType")
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("shipment_type_refs")
+}
+
+model PackageTypeRef {
+  id        String   @id @default(cuid())
+  tenantId  String
+  code      String
+  label     String
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shipmentLines ShipmentLine[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("package_type_refs")
+}
+
+model StorageZone {
+  id          String   @id @default(cuid())
+  tenantId    String
+  yardId      String
+  code        String
+  label       String
+  description String?
+  surfaceM2   Float? // surface allouée à cette zone (héritée ou sous-répartition du yard)
+  capacity    Int? // nombre max de colis/conteneurs
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  // Tracé de la zone à l'intérieur du périmètre du yard (Yard.perimeter) —
+  // même format/référentiel que YardBlockDef.polygon (points {x,y} en %,
+  // relatifs au bounding box du périmètre). null = zone sans tracé.
+  polygon     Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant            Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  yard              Yard                   @relation(fields: [yardId], references: [id], onDelete: Cascade)
+  shipmentLines     ShipmentLine[]
+  clientAllocations ClientZoneAllocation[]
+
+  @@unique([yardId, code])
+  @@index([tenantId])
+  @@index([yardId])
+  @@map("storage_zones")
+}
+
+model ClientZoneAllocation {
+  id          String   @id @default(cuid())
+  tenantId    String // opérateur (DMT)
+  clientId    String // FK Tenant type=CLIENT
+  zoneId      String // FK StorageZone
+  quotaM2     Float? // null = pas de quota défini
+  isExclusive Boolean  @default(false)
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  zone   StorageZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  client Tenant      @relation("ClientZoneAllocationClient", fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, zoneId])
+  @@index([tenantId])
+  @@index([clientId])
+  @@index([zoneId])
+  @@map("client_zone_allocations")
+}
+
+// ─────────────────────────────────────────────
+// YMS
+// ─────────────────────────────────────────────
+
+enum ContainerType {
+  DRY
+  REEFER
+  OPEN_TOP
+  FLAT_RACK
+  EMPTY
+}
+
+enum YardContainerStatus {
+  IN_YARD
+  GATE_IN_PROGRESS
+  POSITIONING
+  GATE_OUT_PROGRESS
+  DEPARTED
+  ON_HOLD
+}
+
+enum YardMovementType {
+  GATE_IN
+  REPOSITION
+  GATE_OUT
+  HOUSEKEEPING
+}
+
+model YardContainer {
+  id               String              @id @default(cuid())
+  tenantId         String
+  clientId         String? // FK vers Tenant type=CLIENT — propriétaire de la marchandise
+  yardId           String
+  containerNumber  String
+  isoTypeCode      String
+  sizeFt           Int                 @default(20)
+  containerType    ContainerType       @default(DRY)
+  grossWeightKg    Float?
+  shippingLine     String?
+  voyageCode       String? // saisi en gate-in manuel (pas de pré-gate) ; sinon hérité du pré-gate
+  status           YardContainerStatus @default(IN_YARD)
+  customsHold      Boolean             @default(false)
+  isDangerousGoods Boolean             @default(false)
+  sealNumber       String?
+  gateInDate       DateTime?
+  gateOutDate      DateTime?
+  notes            String?
+  driverName       String?
+  driverPhone      String?
+  truckPlate       String?
+  gateOutCarrier   String?
+  gateOutDriverCin String?
+  gateOutPermitNo  String?
+  originLocation   String?
+  destination      String?
+  damages          String[]            @default([])
+  preGateLineId    String? // référence informelle à la ligne pré-gate (pas de relation Prisma pour éviter la circularité)
+  // Modalités de paiement — propagé depuis le PreGate si gate-in depuis pré-gate
+  // (plusieurs conteneurs peuvent alors partager le même Payment), ou un Payment
+  // dédié créé directement si gate-in manuel (pas de pré-gate).
+  paymentId        String?
+  // Dépotage — le conteneur est en cours de vidage vers un/des dossier(s) WMS.
+  // Levé automatiquement quand le dernier ShipmentFile lié atteint FULLY_OUT,
+  // ou manuellement via l'action "Fin de dépotage" côté yard.
+  isBeingDevanned  Boolean             @default(false)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  yardPositionId String?
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  client         Tenant?         @relation("YardContainerClient", fields: [clientId], references: [id])
+  yard           Yard            @relation(fields: [yardId], references: [id])
+  yardPosition   YardPosition?   @relation(fields: [yardPositionId], references: [id])
+  payment        Payment?        @relation(fields: [paymentId], references: [id])
+  movements      YardMovement[]
+  shipmentFiles  ShipmentFile[]
+  operationLines OperationLine[]
+
+  @@index([tenantId])
+  @@index([clientId])
+  @@index([yardId])
+  @@index([status])
+  @@index([containerNumber])
+  @@index([paymentId])
+  @@map("yard_containers")
+}
+
+model YardBlockDef {
+  id                  String   @id @default(cuid())
+  tenantId            String
+  yardId              String
+  code                String // libre : "N1", "ZONE-A", "HANGAR-2"…
+  label               String? // nom affiché : "Zone Nord 1"
+  maxTier             Int      @default(3)
+  allowDangerousGoods Boolean  @default(false)
+  allowReefer         Boolean  @default(false)
+  allowEmpty          Boolean  @default(true)
+  allowAllTypes       Boolean  @default(true) // si true, accepte tous les types
+  isActive            Boolean  @default(true)
+  sortOrder           Int      @default(0)
+  // Tracé du polygone du bloc à l'intérieur du périmètre du yard
+  // (Yard.perimeter) — tableau de points [{x,y}, ...] en pourcentage
+  // (0-100), PAS en pixels : reste valide quel que soit le zoom/la
+  // résolution d'affichage. null = bloc sans tracé (yard sans périmètre, ou
+  // bloc pas encore positionné) — reste utilisable via la configuration
+  // numérique (bays/rows/tiers) uniquement, indépendante de ce tracé.
+  // Occupation affichée dessus = même calcul positions occupées/total
+  // qu'aujourd'hui (YardPosition.isOccupied), juste visualisée sur la
+  // vraie forme au lieu d'un rectangle CSS générique.
+  polygon             Json?
+  createdAt           DateTime @default(now())
+
+  tenant    Tenant         @relation(fields: [tenantId], references: [id])
+  yard      Yard           @relation(fields: [yardId], references: [id])
+  positions YardPosition[]
+
+  @@unique([yardId, code])
+  @@index([tenantId])
+  @@index([yardId])
+  @@map("yard_block_defs")
+}
+
+model YardPosition {
+  id             String   @id @default(cuid())
+  yardId         String
+  block          String
+  yardBlockDefId String?
+  bay            Int
+  row            Int
+  tier           Int
+  isOccupied     Boolean  @default(false)
+  maxTier        Int      @default(3)
+  createdAt      DateTime @default(now())
+
+  yard          Yard            @relation(fields: [yardId], references: [id], onDelete: Cascade)
+  blockDef      YardBlockDef?   @relation(fields: [yardBlockDefId], references: [id], onDelete: SetNull)
+  containers    YardContainer[]
+  movementsFrom YardMovement[]  @relation("FromPosition")
+  movementsTo   YardMovement[]  @relation("ToPosition")
+
+  @@unique([yardId, block, bay, row, tier])
+  @@index([yardId])
+  @@index([block])
+  @@index([yardBlockDefId])
+  @@index([isOccupied])
+  @@map("yard_positions")
+}
+
+model YardMovement {
+  id              String           @id @default(cuid())
+  yardContainerId String
+  fromPositionId  String?
+  toPositionId    String?
+  movementType    YardMovementType
+  operatorId      String
+  confirmedAt     DateTime?
+  notes           String?
+  createdAt       DateTime         @default(now())
+
+  container    YardContainer @relation(fields: [yardContainerId], references: [id], onDelete: Cascade)
+  fromPosition YardPosition? @relation("FromPosition", fields: [fromPositionId], references: [id])
+  toPosition   YardPosition? @relation("ToPosition", fields: [toPositionId], references: [id])
+  operator     User          @relation(fields: [operatorId], references: [id])
+
+  @@index([yardContainerId])
+  @@index([movementType])
+  @@map("yard_movements")
+}
+
+// ─────────────────────────────────────────────
+// YMS — PRÉ-GATE & RÉFÉRENTIELS
+// ─────────────────────────────────────────────
+
+enum TransportMode {
+  SEA
+  ROAD
+  RAIL
+  AIR
+}
+
+enum PreGateStatus {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+}
+
+enum PreGateLineStatus {
+  EXPECTED
+  ARRIVED
+  REJECTED
+  EXTRA
+}
+
+model PreGate {
+  id            String        @id @default(cuid())
+  tenantId      String
+  clientId      String? // FK vers Tenant type=CLIENT — propriétaire de la marchandise
+  yardId        String
+  voyageCode    String
+  vesselName    String?
+  eta           DateTime?
+  shippingLine  String?
+  transportMode TransportMode @default(SEA)
+  status        PreGateStatus @default(OPEN)
+  notes         String?
+  // Modalités de paiement — un seul Payment pour tout le pré-gate
+  paymentId     String?       @unique
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client  Tenant?       @relation("PreGateClient", fields: [clientId], references: [id])
+  yard    Yard          @relation(fields: [yardId], references: [id])
+  payment Payment?      @relation(fields: [paymentId], references: [id])
+  lines   PreGateLine[]
+
+  @@index([tenantId])
+  @@index([clientId])
+  @@index([yardId])
+  @@index([status])
+  @@index([paymentId])
+  @@map("pre_gates")
+}
+
+model PreGateLine {
+  id               String            @id @default(cuid())
+  preGateId        String
+  containerNumber  String
+  isoTypeCode      String            @default("20DC")
+  sizeFt           Int               @default(20)
+  containerType    ContainerType     @default(DRY)
+  grossWeightKg    Float?
+  sealNumber       String?
+  // Armateur du conteneur — hérite de PreGate.shippingLine à la création
+  // (valeur par défaut), mais peut différer par conteneur.
+  shippingLine     String?
+  isDangerousGoods Boolean           @default(false)
+  customsHold      Boolean           @default(false)
+  status           PreGateLineStatus @default(EXPECTED)
+  yardContainerId  String?
+  notes            String?
+  createdAt        DateTime          @default(now())
+
+  preGate PreGate @relation(fields: [preGateId], references: [id], onDelete: Cascade)
+
+  @@index([preGateId])
+  @@index([status])
+  @@map("pre_gate_lines")
+}
+
+model ShippingLineRef {
+  id        String   @id @default(cuid())
+  tenantId  String
+  code      String
+  label     String
+  scac      String?
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("shipping_line_refs")
+}
+
+// ─────────────────────────────────────────────
+// COMMUN — EIR (Equipment Interchange Receipt) / inspection d'unité
+// Réutilisé pour inspectUnit() côté frontend (dos-store.js) : une unité
+// (ShipmentLine ou YardContainer, jamais les deux) peut recevoir plusieurs
+// EIR au fil de son cycle (ex: un ENTRY à l'arrivée, un EXIT à la sortie).
+// referenceType/referenceId restent génériques (pas de relation Prisma
+// typée) pour ne pas complexifier les deux FK optionnelles exclusives —
+// résolu applicativement dans EirService selon referenceType.
+// ─────────────────────────────────────────────
+
+enum EirReferenceType {
+  SHIPMENT_LINE
+  YARD_CONTAINER
+}
+
+enum EirType {
+  ENTRY
+  EXIT
+}
+
+enum EirCondition {
+  GOOD
+  RESERVE
+  DAMAGED
+}
+
+model EIR {
+  id            String           @id @default(cuid())
+  tenantId      String
+  // Référence lisible auto-générée (EIR-<année>-<séquence>, voir
+  // OperationsService.inspectUnit) — jamais saisie manuellement côté
+  // frontend, affichée en lecture seule une fois l'inspection enregistrée.
+  reference     String           @unique
+  referenceType EirReferenceType
+  referenceId   String
+  type          EirType          @default(ENTRY)
+  // Checklist de contrôle cochée (ex: ["Plombs intacts", "Pas de trace de choc"])
+  checks        String[]         @default([])
+  condition     EirCondition     @default(GOOD)
+  description   String?
+  damages       Json?
+  photos        String[]         @default([])
+  generatedById String?
+  createdAt     DateTime         @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([referenceType, referenceId])
+  @@map("eirs")
+}
+
+model ContainerTypeRef {
+  id        String   @id @default(cuid())
+  tenantId  String
+  code      String
+  label     String
+  isoPrefix String?
+  sizeFt    Int      @default(20)
+  family    String   @default("dry")
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("container_type_refs")
+}
