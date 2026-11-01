@@ -1,0 +1,62 @@
+http:
+  middlewares:
+
+    # ── Security Headers (OWASP A05) ─────────────────────────────────────────
+    security-headers:
+      headers:
+        # Empêche le sniffing de Content-Type (OWASP A05)
+        contentTypeNosniff: true
+        # Protection XSS navigateurs anciens
+        browserXssFilter: true
+        # Interdit l'affichage dans une iframe (clickjacking)
+        frameDeny: true
+        # Force HTTPS pendant 1 an (HSTS)
+        forceSTSHeader: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        # Referrer limité à la même origine
+        referrerPolicy: "strict-origin-when-cross-origin"
+        # CSP : adapté à Next.js + Google Fonts
+        contentSecurityPolicy: >
+          default-src 'self';
+          script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+          font-src 'self' https://fonts.gstatic.com;
+          img-src 'self' data: blob:;
+          connect-src 'self';
+          frame-ancestors 'none';
+        customResponseHeaders:
+          X-Powered-By: ""          # Ne pas exposer la stack technique
+
+    # ── Rate limit global API (OWASP A04) ────────────────────────────────────
+    api-ratelimit:
+      rateLimit:
+        average: 60      # 60 requêtes par minute par IP
+        burst: 20        # pic autorisé
+        period: 1m
+        sourceCriterion:
+          ipStrategy:
+            depth: 1     # prend l'IP réelle derrière Traefik
+
+    # ── Rate limit renforcé endpoints auth (OWASP A04) ───────────────────────
+    auth-ratelimit:
+      rateLimit:
+        average: 10      # 10 tentatives de login par minute par IP
+        burst: 5
+        period: 1m
+        sourceCriterion:
+          ipStrategy:
+            depth: 1
+
+    # ── Compression réponses (DDIA : performance) ─────────────────────────────
+    compress:
+      compress: {}
+
+    # ── Strip /api prefix avant de forwarder à NestJS ────────────────────────
+    # NestJS a déjà setGlobalPrefix('api') donc on ne strip pas
+    # (laisser commenté — décommenter si tu retires le prefix NestJS)
+    # strip-api-prefix:
+    #   stripPrefix:
+    #     prefixes:
+    #       - /api
